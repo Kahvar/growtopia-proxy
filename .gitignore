@@ -1,0 +1,25 @@
+# Build output
+bin/
+
+# Packet captures
+*.pcap
+*.pcapng
+
+# Certificates
+*.crt
+*.csr
+*.key
+*.srl
+*.ext
+
+# Logs
+*.log
+out.txt
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# VS Code
+.vscode/
+.vs/
