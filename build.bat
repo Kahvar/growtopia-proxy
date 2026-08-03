@@ -19,30 +19,60 @@ for /f "delims=" %%v in ('gcc -dumpversion') do set GCC_VER=%%v
 echo [OK] gcc found, version: %GCC_VER%
 echo.
 
-REM
-if not exist "C:\mingw64\include\openssl\ssl.h" (
-    echo [ERROR] OpenSSL-headers are missing: C:\mingw64\include\openssl\ssl.h
-    echo         Install the dev package from https://slproweb.com/products/Win32OpenSSL.html
+REM Determine OPENSSL_DIR. If user set OPENSSL_DIR honor it; otherwise probe common locations.
+if "%OPENSSL_DIR%"=="" (
+    if exist "C:\mingw64\include\openssl\ssl.h" (
+        set "OPENSSL_DIR=C:\mingw64"
+    ) else if exist "C:\msys64\ucrt64\include\openssl\ssl.h" (
+        set "OPENSSL_DIR=C:\msys64\ucrt64"
+    ) else if exist "C:\msys64\mingw64\include\openssl\ssl.h" (
+        set "OPENSSL_DIR=C:\msys64\mingw64"
+    ) else if exist "C:\OpenSSL-Win64\include\openssl\ssl.h" (
+        set "OPENSSL_DIR=C:\OpenSSL-Win64"
+    ) else if exist "C:\Program Files\OpenSSL-Win64\include\openssl\ssl.h" (
+        set "OPENSSL_DIR=C:\Program Files\OpenSSL-Win64"
+    ) else (
+        set "OPENSSL_DIR=C:\mingw64"
+    )
+)
+echo [INFO] Using OPENSSL_DIR=%OPENSSL_DIR%
+
+if not exist "%OPENSSL_DIR%\include\openssl\ssl.h" (
+    echo [ERROR] OpenSSL-headers are missing: %OPENSSL_DIR%\include\openssl\ssl.h
+    echo         Install the dev package or set OPENSSL_DIR to your OpenSSL installation path.
     goto :fail
 )
 echo [OK] OpenSSL-header found.
 
 REM 
+set OPENSSL_LIB_SSL=
+set OPENSSL_LIB_CRYPTO=
 set MISSING_LIB=0
-if not exist "C:\mingw64\lib\libssl.dll.a" (
-    echo [ERROR] Missing: C:\mingw64\lib\libssl.dll.a
+rem Prefer libssl.dll.a/libcrypto.dll.a, but accept libssl.a/libcrypto.a (MSYS/MinGW differences)
+if exist "%OPENSSL_DIR%\lib\libssl.dll.a" (
+    set "OPENSSL_LIB_SSL=%OPENSSL_DIR%\lib\libssl.dll.a"
+) else if exist "%OPENSSL_DIR%\lib\libssl.a" (
+    set "OPENSSL_LIB_SSL=%OPENSSL_DIR%\lib\libssl.a"
+) else (
+    echo [ERROR] Missing OpenSSL lib: libssl.dll.a or libssl.a under %OPENSSL_DIR%\lib
     set MISSING_LIB=1
 )
-if not exist "C:\mingw64\lib\libcrypto.dll.a" (
-    echo [ERROR] Missing: C:\mingw64\lib\libcrypto.dll.a
+
+if exist "%OPENSSL_DIR%\lib\libcrypto.dll.a" (
+    set "OPENSSL_LIB_CRYPTO=%OPENSSL_DIR%\lib\libcrypto.dll.a"
+) else if exist "%OPENSSL_DIR%\lib\libcrypto.a" (
+    set "OPENSSL_LIB_CRYPTO=%OPENSSL_DIR%\lib\libcrypto.a"
+) else (
+    echo [ERROR] Missing OpenSSL lib: libcrypto.dll.a or libcrypto.a under %OPENSSL_DIR%\lib
     set MISSING_LIB=1
 )
+
 if !MISSING_LIB! equ 1 (
     echo         [ERROR] OpenSSL libraries are missing.
-    echo         Please install OpenSSL development package first.
+    echo         Please install OpenSSL development package first or set OPENSSL_DIR to the correct path.
     goto :fail
 )
-echo [OK] OpenSSL-Libraries found.
+echo [OK] OpenSSL-Libraries found: %OPENSSL_LIB_SSL% %OPENSSL_LIB_CRYPTO%
 
 REM
 set MISSING_DLL=0
@@ -55,10 +85,10 @@ if not exist "bin\libcrypto-3-x64.dll" (
     set MISSING_DLL=1
 )
 if !MISSING_DLL! equ 1 (
-    echo         Copying from C:\mingw64\bin...
-    copy /Y "C:\mingw64\bin\libssl-3-x64.dll" bin >nul
-    copy /Y "C:\mingw64\bin\libcrypto-3-x64.dll" bin >nul
-    if exist "libssl-3-x64.dll" (
+    echo         Copying from %OPENSSL_DIR%\bin...
+    copy /Y "%OPENSSL_DIR%\bin\libssl-3-x64.dll" bin >nul
+    copy /Y "%OPENSSL_DIR%\bin\libcrypto-3-x64.dll" bin >nul
+    if exist "bin\libssl-3-x64.dll" (
         echo [OK] DLLS copied.
     ) else (
         echo [ERROR] DLL copy failed.
@@ -89,8 +119,8 @@ gcc -o bin\proxy.exe ^
     enet\packet.c enet\peer.c enet\protocol.c enet\win32.c ^
     -I. -Ienet ^
     -Wall -Wextra ^
-    -lws2_32 -lwinmm -liphlpapi -lwininet ^
-    C:\mingw64\lib\libssl.dll.a C:\mingw64\lib\libcrypto.dll.a
+    -lws2_32 -lwinmm -liphlpapi -lwininet -ldnsapi ^
+    %OPENSSL_LIB_SSL% %OPENSSL_LIB_CRYPTO%
 
 if errorlevel 1 (
     echo.
