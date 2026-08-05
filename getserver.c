@@ -263,10 +263,13 @@ int forward_server_data(
         InternetSetOptionA(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &security_flags, sizeof(security_flags));
     }
 
-    char headers[256];
+    char headers[512];
     snprintf(headers, sizeof(headers),
         "Content-Type: application/x-www-form-urlencoded\r\n"
-        "Host: %s\r\n", TARGET_DOMAIN);
+        "Host: %s\r\n"
+        "Accept: */*\r\n"
+        "Accept-Encoding: identity\r\n",
+        TARGET_DOMAIN);
 
     BOOL sent = HttpSendRequestA(
         hRequest, headers, (DWORD)strlen(headers),
