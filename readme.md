@@ -25,10 +25,6 @@
   * [ ] `/dd`
   * [ ] `/cd`
   * [ ] `/spam`
-* [ ] Learn code obfuscation
-* [ ] Package releases
-* [ ] Add a licensing system
-* [ ] Integrate AutoSurg into the standard license
 
 ---
 
@@ -111,39 +107,6 @@ build.bat
 
 No source files need to be copied manually.
 
----
-
-# Updating the Repository
-
-Using the helper script:
-
-```bat
-push.bat
-```
-
----
-
-# Project Structure
-
-```text
-proxy/
-│
-├── bin/                  # Build output (ignored by Git)
-├── enet/                 # ENet source
-│
-├── proxy.c               # Main proxy
-├── https.c               # HTTPS handling
-├── hosts.c               # Hosts file modification
-├── getserver.c           # Server lookup
-├── packet.h
-│
-├── build.bat
-├── push.bat
-├── make_cert.bat
-│
-├── .gitignore
-└── README.md
-```
 
 
 > *Drink coffee ☕.*
