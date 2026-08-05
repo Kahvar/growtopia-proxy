@@ -5,6 +5,11 @@
 #include <stdio.h>
 #include <string.h>
 #define ENET_BUILDING_LIB 1
+#include <stddef.h>  /* for offsetof() */
+
+#ifndef ENET_OFFSETOF
+#define ENET_OFFSETOF(type, member) offsetof(type, member)
+#endif
 #include "enet/utility.h"
 #include "enet/time.h"
 #include "enet/enet.h"
@@ -1012,6 +1017,7 @@ enet_protocol_handle_verify_connect (ENetHost * host, ENetEvent * event, ENetPee
 static int
 enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
 {
+    printf("handle_incoming_commands()\n");
     ENetProtocolHeader * header;
     ENetProtocol * command;
     ENetPeer * peer;
@@ -1029,6 +1035,10 @@ enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
     sessionID = (peerID & ENET_PROTOCOL_HEADER_SESSION_MASK) >> ENET_PROTOCOL_HEADER_SESSION_SHIFT;
     flags = peerID & ENET_PROTOCOL_HEADER_FLAG_MASK;
     peerID &= ~ (ENET_PROTOCOL_HEADER_FLAG_MASK | ENET_PROTOCOL_HEADER_SESSION_MASK);
+    printf("peerID=%u flags=%04X sentTime=%u\n",
+       peerID,
+       flags,
+       ENET_NET_TO_HOST_16(header->sentTime));
 
     headerSize = (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME ? sizeof (ENetProtocolHeader) : ENET_OFFSETOF(ENetProtocolHeader, sentTime));
     if (host -> checksum != NULL)
@@ -1259,6 +1269,13 @@ enet_protocol_receive_incoming_commands (ENetHost * host, ENetEvent * event)
 
        host -> receivedData = host -> packetData [0];
        host -> receivedDataLength = receivedLength;
+
+       printf("RX %d bytes: ", receivedLength);
+
+       for (int i = 0; i < receivedLength; i++)
+            printf("%02X ", host->receivedData[i]);
+
+       printf("\n");
       
        host -> totalReceivedData += receivedLength;
        host -> totalReceivedPackets ++;

@@ -36,6 +36,73 @@ static void trim_newline(char* str) {
     }
 }
 
+// Helper to detect maintenance messages in server_data responses.
+static int is_maintenance(const char *body) {
+    if (!body) return 0;
+    if (strstr(body, "#maint|") != NULL) return 1;
+    if (strstr(body, "Server is under maintenance") != NULL) return 1;
+    return 0;
+}
+
+// Try to extract an alternate server and port from the response body.
+// We look for beta2_server/beta2_port, beta3_server/beta3_port, beta_server/beta_port,
+// then fallback to any "server|..." / "port|..." pair.
+// Returns 0 on success and fills out_host/out_port; non-zero if none found.
+static int choose_alternate_server(const char *body, char *out_host, size_t out_host_size, int *out_port) {
+    if (!body || !out_host || !out_port) return 1;
+    const char *keys[] = { "beta2_server|", "beta2_port|", "beta3_server|", "beta3_port|", "beta_server|", "beta_port|" };
+    for (int i = 0; i < (int)(sizeof(keys)/sizeof(keys[0])); i += 2) {
+        const char *skey = keys[i];
+        const char *pkey = keys[i+1];
+        const char *spos = strstr(body, skey);
+        const char *ppos = strstr(body, pkey);
+        if (spos && ppos) {
+            char hostbuf[256] = {0};
+            int port = 0;
+            if (sscanf(spos, "%255[^\r\n]", hostbuf) == 1) {
+                const char *pipe = strchr(hostbuf, '|');
+                if (pipe && pipe[1]) {
+                    strncpy(out_host, pipe + 1, out_host_size - 1);
+                    out_host[out_host_size - 1] = '\0';
+                    // parse port line
+                    char portbuf[64] = {0};
+                    if (sscanf(ppos, "%63[^\r\n]", portbuf) == 1) {
+                        const char *ppipe = strchr(portbuf, '|');
+                        if (ppipe && ppipe[1]) {
+                            port = atoi(ppipe + 1);
+                            if (port > 0 && port <= 65535) {
+                                *out_port = port;
+                                // trim newline from out_host
+                                char *nl = strpbrk(out_host, "\r\n");
+                                if (nl) *nl = '\0';
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Last resort: look for any server|... and port|... pair
+    const char *s1 = strstr(body, "server|");
+    const char *p1 = strstr(body, "port|");
+    if (s1 && p1) {
+        char hostbuf[256] = {0};
+        int port = 0;
+        if (sscanf(s1, "server|%255[^\r\n]", hostbuf) == 1) {
+            if (sscanf(p1, "port|%d", &port) == 1 && port > 0 && port <= 65535) {
+                strncpy(out_host, hostbuf, out_host_size - 1);
+                out_host[out_host_size - 1] = '\0';
+                *out_port = port;
+                return 0;
+            }
+        }
+    }
+
+    return 1; // none found
+}
+
 int resolve_via_doh(const char* domain, char* out_ip, size_t out_size) {
     int result = 1;
 
@@ -237,33 +304,155 @@ int forward_server_data(
 
     printf("[FORWARD] Oikean palvelimen vastaus (%zu tavua):\n%s\n", total_read, full_buffer);
 
-    // --- Poimitaan oikea server/port talteen g_target_ip/g_target_port:iin
-    //     (proxy.c:n serverHost tarvitsee naita ulosmenevaan yhteyteen) ---
-    const char* server_line = strstr(full_buffer, "server|");
-    const char* port_line = strstr(full_buffer, "port|");
+    // If the response indicates maintenance, try to pick an alternate server
+    if (is_maintenance(full_buffer)) {
+        printf("[FORWARD] Primary returned maintenance, searching for alternate in response...\n");
+        char alt_host[256] = {0};
+        int alt_port = 0;
+        if (choose_alternate_server(full_buffer, alt_host, sizeof(alt_host), &alt_port) == 0) {
+            printf("[FORWARD] Found alternate server in payload: %s:%d\n", alt_host, alt_port);
+            char resolved_alt[64] = {0};
+            if (resolve_via_doh(alt_host, resolved_alt, sizeof(resolved_alt)) == 0) {
+                strncpy(g_target_ip, resolved_alt, sizeof(g_target_ip) - 1);
+                g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+                printf("[DoH] Resolved alternate %s -> %s\n", alt_host, g_target_ip);
+            } else {
+                // Use hostname directly if DoH resolution failed
+                strncpy(g_target_ip, alt_host, sizeof(g_target_ip) - 1);
+                g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+                printf("[FORWARD] Could not DoH-resolve %s, will use hostname directly\n", alt_host);
+            }
+            g_target_port = alt_port;
+        } else {
+            // Fallback: try the secondary main endpoint (www.growtopia2.com)
+            const char* secondary = "www.growtopia2.com";
+            char resolved2[64] = {0};
+            if (resolve_via_doh(secondary, resolved2, sizeof(resolved2)) == 0) {
+                printf("[FORWARD] Trying secondary domain %s -> %s\n", secondary, resolved2);
 
-    if (server_line) {
-        char temp_ip[64];
-        if (sscanf(server_line, "server|%63[^\n]", temp_ip) == 1) {
-            trim_newline(temp_ip);
-            strncpy(g_target_ip, temp_ip, sizeof(g_target_ip) - 1);
-            g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+                HINTERNET hInternet2 = InternetOpenA(
+                    user_agent && user_agent[0] ? user_agent : "UbiApp/2.0 (Windows; Growtopia)",
+                    INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0
+                );
+                if (hInternet2) {
+                    DWORD timeout2 = REQUEST_TIMEOUT_MS;
+                    InternetSetOptionA(hInternet2, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout2, sizeof(timeout2));
+                    InternetSetOptionA(hInternet2, INTERNET_OPTION_SEND_TIMEOUT, &timeout2, sizeof(timeout2));
+                    InternetSetOptionA(hInternet2, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout2, sizeof(timeout2));
+
+                    HINTERNET hConnect2 = InternetConnectA(
+                        hInternet2, resolved2, INTERNET_DEFAULT_HTTPS_PORT,
+                        NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0
+                    );
+                    if (hConnect2) {
+                        const char* acceptTypes2[] = { "*/*", NULL };
+                        HINTERNET hRequest2 = HttpOpenRequestA(
+                            hConnect2, "POST", "/growtopia/server_data.php",
+                            NULL, NULL, acceptTypes2,
+                            INTERNET_FLAG_SECURE | INTERNET_FLAG_RELOAD, 0
+                        );
+                        if (hRequest2) {
+                            DWORD security_flags = 0;
+                            DWORD flags_size = sizeof(security_flags);
+                            InternetQueryOptionA(hRequest2, INTERNET_OPTION_SECURITY_FLAGS, &security_flags, &flags_size);
+                            security_flags |= SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
+                            InternetSetOptionA(hRequest2, INTERNET_OPTION_SECURITY_FLAGS, &security_flags, sizeof(security_flags));
+
+                            char headers2[256];
+                            snprintf(headers2, sizeof(headers2), "Content-Type: application/x-www-form-urlencoded\r\nHost: %s\r\n", secondary);
+
+                            BOOL sent2 = HttpSendRequestA(hRequest2, headers2, (DWORD)strlen(headers2), (LPVOID)client_body, (DWORD)client_body_len);
+                            if (sent2) {
+                                char buf2[4096];
+                                size_t tot2 = 0;
+                                char chunk2[2048];
+                                DWORD br2 = 0;
+                                while (InternetReadFile(hRequest2, chunk2, sizeof(chunk2) - 1, &br2) && br2 > 0) {
+                                    if (tot2 + br2 >= sizeof(buf2) - 1) break;
+                                    memcpy(buf2 + tot2, chunk2, br2);
+                                    tot2 += br2;
+                                }
+                                buf2[tot2] = '\0';
+                                printf("[FORWARD] Secondary response (%zu bytes):\n%s\n", tot2, buf2);
+
+                                if (!is_maintenance(buf2)) {
+                                    // parse server/port from secondary response
+                                    const char* s_line = strstr(buf2, "server|");
+                                    const char* p_line = strstr(buf2, "port|");
+                                    if (s_line && p_line) {
+                                        char temp_ip2[64] = {0};
+                                        int temp_port2 = 0;
+                                        if (sscanf(s_line, "server|%63[^\n]", temp_ip2) == 1) {
+                                            trim_newline(temp_ip2);
+                                            strncpy(g_target_ip, temp_ip2, sizeof(g_target_ip) - 1);
+                                            g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+                                        }
+                                        if (sscanf(p_line, "port|%d", &temp_port2) == 1) {
+                                            g_target_port = temp_port2;
+                                        }
+                                        if (g_target_ip[0] != '\0' && g_target_port != 0) {
+                                            printf("[FORWARD] Using server from secondary: %s:%d\n", g_target_ip, g_target_port);
+                                        }
+                                    }
+                                } else {
+                                    // try to pull alternate from secondary payload
+                                    char alt2[256] = {0}; int alt2port = 0;
+                                    if (choose_alternate_server(buf2, alt2, sizeof(alt2), &alt2port) == 0) {
+                                        printf("[FORWARD] Found alternate in secondary payload: %s:%d\n", alt2, alt2port);
+                                        char resolved_alt2[64] = {0};
+                                        if (resolve_via_doh(alt2, resolved_alt2, sizeof(resolved_alt2)) == 0) {
+                                            strncpy(g_target_ip, resolved_alt2, sizeof(g_target_ip) - 1);
+                                            g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+                                            printf("[DoH] Resolved alternate %s -> %s\n", alt2, g_target_ip);
+                                        } else {
+                                            strncpy(g_target_ip, alt2, sizeof(g_target_ip) - 1);
+                                            g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+                                            printf("[FORWARD] Could not DoH-resolve %s, will use hostname directly\n", alt2);
+                                        }
+                                        g_target_port = alt2port;
+                                    }
+                                }
+                            } else {
+                                fprintf(stderr, "[FORWARD] HttpSendRequest to secondary failed.\n");
+                            }
+
+                            InternetCloseHandle(hRequest2);
+                        }
+                        InternetCloseHandle(hConnect2);
+                    }
+                    InternetCloseHandle(hInternet2);
+                }
+            } else {
+                fprintf(stderr, "[DoH] Could not resolve secondary domain %s\n", secondary);
+            }
         }
-    }
-    if (port_line) {
-        int temp_port = 0;
-        if (sscanf(port_line, "port|%d", &temp_port) == 1) {
-            g_target_port = temp_port;
+    } else {
+        // Not maintenance: parse server/port from the response body as before
+        const char* server_line = strstr(full_buffer, "server|");
+        const char* port_line = strstr(full_buffer, "port|");
+
+        if (server_line) {
+            char temp_ip[64];
+            if (sscanf(server_line, "server|%63[^\n]", temp_ip) == 1) {
+                trim_newline(temp_ip);
+                strncpy(g_target_ip, temp_ip, sizeof(g_target_ip) - 1);
+                g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+            }
+        }
+        if (port_line) {
+            int temp_port = 0;
+            if (sscanf(port_line, "port|%d", &temp_port) == 1) {
+                g_target_port = temp_port;
+            }
         }
     }
 
     if (g_target_ip[0] == '\0' || g_target_port == 0) {
-        fprintf(stderr, "[FORWARD] Vastauksesta ei loytynyt kelvollista server/port-kenttaa.\n");
-        return 1;
+        fprintf(stderr, "[FORWARD] No usable target server/port was found or resolved. Forwarding original maintenance response to client (no upstream connection set).\n");
+        // Still rewrite the response the same way so client points to local proxy, but proxy won't have a valid upstream to connect.
+    } else {
+        printf("[FORWARD] Real server to connect: %s:%d (client will be redirected to 127.0.0.1:%d)\n", g_target_ip, g_target_port, local_proxy_port);
     }
-
-    printf("[FORWARD] Oikea pelipalvelin: %s:%d (client ohjataan 127.0.0.1:%d)\n",
-           g_target_ip, g_target_port, local_proxy_port);
 
     // --- Rakennetaan clientille lahetettava vastaus: kaikki muu
     //     sailytetaan, server/port korvataan paikallisiksi. ---
@@ -279,6 +468,9 @@ int forward_server_data(
             out_len += snprintf(rewritten + out_len, sizeof(rewritten) - out_len, "server|127.0.0.1\n");
         } else if (strncmp(line_start, "port|", 5) == 0) {
             out_len += snprintf(rewritten + out_len, sizeof(rewritten) - out_len, "port|%d\n", local_proxy_port);
+        } else if (strncmp(line_start, "#maint|", 7) == 0) {
+            // Skip maintenance marker lines entirely so client doesn't show maintenance UI
+            // Do nothing (do not copy this line)
         } else {
             if (out_len + line_len < sizeof(rewritten)) {
                 memcpy(rewritten + out_len, line_start, line_len);

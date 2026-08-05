@@ -74,7 +74,9 @@ if !MISSING_LIB! equ 1 (
 )
 echo [OK] OpenSSL-Libraries found: %OPENSSL_LIB_SSL% %OPENSSL_LIB_CRYPTO%
 
-REM
+REM Ensure bin directory exists before copying runtime DLLs
+if not exist bin mkdir bin
+
 set MISSING_DLL=0
 if not exist "bin\libssl-3-x64.dll" (
     echo [WARNING] libssl-3-x64.dll Missing.

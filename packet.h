@@ -77,20 +77,21 @@ typedef enum {
 // Kokonaispituus tyypillisesti 56 tavua + mahdollinen extra_data
 // (esim. chat-teksti), jonka pituuden extra_data_len kertoo.
 typedef struct {
-    uint8_t  type;            // eTankPacketType
-    uint8_t  unused1[3];      // alignment
-    int32_t  net_id;          // laheattajan net id (-1 = ei kohdetta)
-    int32_t  target_net_id;   // kohteen net id, esim. keneen isketaan
-    uint8_t  flags;           // bittilippuja (mm. onko extra_data mukana)
-    uint8_t  unused2[3];
-    int32_t  value;           // esim. damage / hp / count riippuen typesta
-    int32_t  int_x;           // tile-koordinaatti X
-    int32_t  int_y;           // tile-koordinaatti Y
-    float    pos_x;           // pelaajan tarkka X-sijainti maailmassa
-    float    pos_y;           // pelaajan tarkka Y-sijainti maailmassa
-    int32_t  extra_data_len;  // extra_data:n pituus tavuina (0 jos ei ole)
-    // extra_data seuraa tassa paketin lopussa, extra_data_len tavua,
-    // jos flags:issa on sita vastaava bitti paalla.
+    uint8_t  type;
+    uint8_t  pad[3];
+    uint32_t net_id;
+    int32_t  item_net_id;
+    uint32_t flags;
+    float    float_var;
+    int32_t  int_data;
+    float    pos_x;
+    float    pos_y;
+    float    pos_x2;
+    float    pos_y2;
+    uint8_t  pad2[4];
+    int32_t  int_x;
+    int32_t  int_y;
+    uint32_t data_size;
 } GameUpdatePacket;
 
 #pragma pack(pop)

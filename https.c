@@ -23,6 +23,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <stdbool.h>
+
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -53,25 +55,25 @@ static int init_openssl_ctx(void) {
     const SSL_METHOD* method = TLS_server_method();
     ssl_ctx = SSL_CTX_new(method);
     if (!ssl_ctx) {
-        fprintf(stderr, "[HTTPS] SSL_CTX_new epaonnistui.\n");
+        fprintf(stderr, "[HTTPS] SSL_CTX_new Failed.\n");
         ERR_print_errors_fp(stderr);
         return 1;
     }
 
     if (SSL_CTX_use_certificate_file(ssl_ctx, TLS_CERT_FILE, SSL_FILETYPE_PEM) <= 0) {
-        fprintf(stderr, "[HTTPS] Sertifikaatin lataus epaonnistui (%s).\n", TLS_CERT_FILE);
+        fprintf(stderr, "[HTTPS] Certificate loading failed (%s).\n", TLS_CERT_FILE);
         ERR_print_errors_fp(stderr);
         return 1;
     }
 
     if (SSL_CTX_use_PrivateKey_file(ssl_ctx, TLS_KEY_FILE, SSL_FILETYPE_PEM) <= 0) {
-        fprintf(stderr, "[HTTPS] Yksityisavaimen lataus epaonnistui (%s).\n", TLS_KEY_FILE);
+        fprintf(stderr, "[HTTPS] Private key loading failed (%s).\n", TLS_KEY_FILE);
         ERR_print_errors_fp(stderr);
         return 1;
     }
 
     if (!SSL_CTX_check_private_key(ssl_ctx)) {
-        fprintf(stderr, "[HTTPS] Sertifikaatti ja avain eivat vastaa toisiaan.\n");
+        fprintf(stderr, "[HTTPS] Certificate and private key do not match.\n");
         return 1;
     }
 
@@ -145,20 +147,51 @@ static void handle_client(SOCKET client_socket) {
         return;
     }
 
-    char request[4096];
-    int received = SSL_read(ssl, request, sizeof(request) - 1);
+    char request[8192];
+    int received = 0;
+    int total_received = 0;
+    int content_length = -1;
+    const char* headers_end = NULL;
+
+    while (true) {
+        int chunk = SSL_read(ssl, request + total_received, sizeof(request) - 1 - total_received);
+        if (chunk <= 0) break;
+        total_received += chunk;
+        request[total_received] = '\0';
+
+        headers_end = strstr(request, "\r\n\r\n");
+        if (headers_end) {
+            char content_length_header[32] = "";
+            extract_header(request, "Content-Length:", content_length_header, sizeof(content_length_header));
+            if (content_length_header[0] != '\0') {
+                content_length = atoi(content_length_header);
+            }
+
+            if (content_length < 0 ||
+                total_received >= (int)((headers_end + 4) - request) + content_length) {
+                break;
+            }
+        }
+
+        if (total_received >= (int)(sizeof(request) - 1)) {
+            break;
+        }
+    }
+
+    received = total_received;
     if (received <= 0) {
         SSL_shutdown(ssl);
         SSL_free(ssl);
         closesocket(client_socket);
         return;
     }
+
     request[received] = '\0';
 
     // HUOM: yksinkertainen tarkistus - riittaa koska tiedamme etta
     // ainoa client tata palvelinta kayttava on Growtopia-peli, ei
     // tarvitse taydellista HTTP-parseria.
-    printf("[HTTPS] Pyynto vastaanotettu (%d tavua):\n%s\n", received, request);
+    printf("[HTTPS] Request received (%d tavua):\n%s\n", received, request);
 
     if (strncmp(request, "POST", 4) == 0 && strstr(request, SERVER_DATA_PATH)) {
         size_t body_len = 0;
@@ -167,12 +200,89 @@ static void handle_client(SOCKET client_socket) {
         char user_agent[256];
         extract_header(request, "User-Agent:", user_agent, sizeof(user_agent));
 
+        /* Log the exact POST body for debugging */
+        if (body && body_len > 0) {
+            printf("[HTTPS] server_data POST body (len=%zu): %.*s\n", body_len, (int)body_len, body);
+        } else {
+            printf("[HTTPS] server_data POST body: <empty>\n");
+        }
+
+        /* Prepare a writable copy so we can optionally override the version parameter.
+           Use PROXY_OVERRIDE_VERSION env var to control the override. */
+        char* body_to_send = NULL;
+        size_t body_to_send_len = 0;
+        if (body) {
+            size_t buf_sz = body_len + 256; /* extra room for modifications */
+            body_to_send = (char*)malloc(buf_sz);
+            if (body_to_send) {
+                memcpy(body_to_send, body, body_len);
+                body_to_send[body_len] = '\0';
+                body_to_send_len = body_len;
+
+                const char* override_ver = getenv("PROXY_OVERRIDE_VERSION");
+                if (override_ver && override_ver[0] != '\0') {
+                    char* vpos = strstr(body_to_send, "version=");
+                    if (vpos) {
+                        char* val_start = vpos + strlen("version=");
+                        char* val_end = strchr(val_start, '&');
+                        size_t prefix_len = (size_t)(vpos - body_to_send);
+                        size_t suffix_len = val_end ? strlen(val_end) : 0;
+                        size_t new_len = prefix_len + strlen("version=") + strlen(override_ver) + suffix_len;
+                        if (new_len < buf_sz) {
+                            char* newbuf = (char*)malloc(new_len + 1);
+                            if (newbuf) {
+                                memcpy(newbuf, body_to_send, prefix_len);
+                                memcpy(newbuf + prefix_len, "version=", strlen("version="));
+                                memcpy(newbuf + prefix_len + strlen("version="), override_ver, strlen(override_ver));
+                                if (val_end) memcpy(newbuf + prefix_len + strlen("version=") + strlen(override_ver), val_end, suffix_len);
+                                newbuf[new_len] = '\0';
+                                free(body_to_send);
+                                body_to_send = newbuf;
+                                body_to_send_len = new_len;
+                                printf("[HTTPS] Overrode version param to: %s\n", override_ver);
+                            } else {
+                                fprintf(stderr, "[HTTPS] Failed to allocate buffer for version override.\n");
+                            }
+                        } else {
+                            fprintf(stderr, "[HTTPS] Cannot override version: result would exceed buffer.\n");
+                        }
+                    } else {
+                        /* Append version parameter if it does not exist */
+                        size_t add_len = 1 + strlen("version=") + strlen(override_ver); /* &version=... */
+                        if (body_to_send_len + add_len < buf_sz) {
+                            body_to_send[body_to_send_len] = '&';
+                            memcpy(body_to_send + body_to_send_len + 1, "version=", strlen("version="));
+                            memcpy(body_to_send + body_to_send_len + 1 + strlen("version="), override_ver, strlen(override_ver));
+                            body_to_send_len += add_len;
+                            body_to_send[body_to_send_len] = '\0';
+                            printf("[HTTPS] Appended version param: %s\n", override_ver);
+                        } else {
+                            fprintf(stderr, "[HTTPS] Cannot append version: result would exceed buffer.\n");
+                        }
+                    }
+                }
+            }
+        }
+
         char response_body[4096];
-        if (body && forward_server_data(body, body_len, user_agent,
-                                         response_body, sizeof(response_body),
-                                         LOCAL_PROXY_PORT) == 0) {
+        int forward_ok = 1;
+        if (body && (body_to_send ? forward_server_data(body_to_send, body_to_send_len, user_agent,
+                                                      response_body, sizeof(response_body),
+                                                      LOCAL_PROXY_PORT)
+                                   : forward_server_data(body, body_len, user_agent,
+                                                         response_body, sizeof(response_body),
+                                                         LOCAL_PROXY_PORT)) == 0) {
+            forward_ok = 0;
+        }
+        if (body_to_send) free(body_to_send);
+
+        if (body && forward_ok == 0) {
             printf("[HTTPS] Valitys onnistui, vastataan clientille.\n");
+            printf("[HTTPS] server_data response to client:\n%s\n", response_body);
             send_http_response(ssl, 200, "OK", response_body);
+        } else if (!body) {
+            fprintf(stderr, "[HTTPS] No body extracted from request.\n");
+            send_http_response(ssl, 400, "Bad Request", "");
         } else {
             fprintf(stderr, "[HTTPS] Valitys oikealle palvelimelle epaonnistui.\n");
             send_http_response(ssl, 502, "Bad Gateway", "");
@@ -287,7 +397,7 @@ int https_start(void) {
         return 1;
     }
 
-    printf("[HTTPS] Kuuntelee porttia %d.\n", HTTPS_PORT);
+    printf("[HTTPS] Listens port %d.\n", HTTPS_PORT);
     return 0;
 }
 

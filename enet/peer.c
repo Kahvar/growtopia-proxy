@@ -117,7 +117,10 @@ enet_peer_send (ENetPeer * peer, enet_uint8 channelID, ENetPacket * packet)
      return -1;
 
    channel = & peer -> channels [channelID];
-   fragmentLength = peer -> mtu - sizeof (ENetProtocolHeader) - sizeof (ENetProtocolSendFragment);
+   if (peer -> host -> usingNewPacket)
+     fragmentLength = peer -> mtu - sizeof (ENetNewProtocolHeader) - sizeof (ENetProtocolSendFragment);
+   else
+     fragmentLength = peer -> mtu - sizeof (ENetProtocolHeader) - sizeof (ENetProtocolSendFragment);
    if (peer -> host -> checksum != NULL)
      fragmentLength -= sizeof(enet_uint32);
 
@@ -180,7 +183,7 @@ enet_peer_send (ENetPeer * peer, enet_uint8 channelID, ENetPacket * packet)
          fragment -> command.sendFragment.fragmentCount = ENET_HOST_TO_NET_32 (fragmentCount);
          fragment -> command.sendFragment.fragmentNumber = ENET_HOST_TO_NET_32 (fragmentNumber);
          fragment -> command.sendFragment.totalLength = ENET_HOST_TO_NET_32 (packet -> dataLength);
-         fragment -> command.sendFragment.fragmentOffset = ENET_HOST_TO_NET_32 (fragmentOffset);
+         fragment -> command.sendFragment.fragmentOffset = ENET_NET_TO_HOST_32 (fragmentOffset);
         
          enet_list_insert (enet_list_end (& fragments), fragment);
       }
